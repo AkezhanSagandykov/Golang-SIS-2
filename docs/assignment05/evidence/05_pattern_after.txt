@@ -1,0 +1,82 @@
+# commit: f07c483  (Refactor CLI: single command table drives help and dispatch (fixes help/dispatch drift))
+# date: 2026-11-21 17:57 +05   host: Linux x86_64
+
+$ go version
+go version go1.24.7 linux/amd64
+[exit code: 0]
+
+$ go env GOOS GOARCH GOFLAGS
+linux
+amd64
+
+[exit code: 0]
+
+$ gofmt -l .
+[exit code: 0]
+
+$ go vet ./...
+[exit code: 0]
+
+$ go build ./...
+[exit code: 0]
+
+$ go test -count=1 ./...
+?   	taskflow/cmd/taskflow	[no test files]
+ok  	taskflow/internal/cli	0.003s
+ok  	taskflow/internal/service	0.012s
+ok  	taskflow/internal/storage	0.044s
+ok  	taskflow/internal/task	0.002s
+ok  	taskflow/internal/worker	0.002s
+[exit code: 0]
+
+$ go test -count=1 -race ./...
+?   	taskflow/cmd/taskflow	[no test files]
+ok  	taskflow/internal/cli	1.016s
+ok  	taskflow/internal/service	1.269s
+ok  	taskflow/internal/storage	1.249s
+ok  	taskflow/internal/task	1.014s
+ok  	taskflow/internal/worker	1.013s
+[exit code: 0]
+
+$ go test -count=1 -cover ./...
+	taskflow/cmd/taskflow		coverage: 0.0% of statements
+ok  	taskflow/internal/cli	0.004s	coverage: 94.7% of statements
+ok  	taskflow/internal/service	0.014s	coverage: 95.9% of statements
+ok  	taskflow/internal/storage	0.057s	coverage: 100.0% of statements
+ok  	taskflow/internal/task	0.006s	coverage: 98.2% of statements
+ok  	taskflow/internal/worker	0.003s	coverage: 100.0% of statements
+[exit code: 0]
+
+$ go test -count=1 -json ./... | (count of passed / failed tests)
+tests (incl. subtests): passed=147 failed=0 skipped=0
+
+$ staticcheck ./...   and   govulncheck ./...
+NOT EXECUTED: staticcheck/govulncheck are not installed and could not be downloaded in this environment (proxy.golang.org blocked: 'Forbidden (agent proxy: no rule or network setting allows this host)').
+
+$ git diff --stat 8db77b3 HEAD
+ README.md                                        |   2 +-
+ docs/assignment05/evidence/04_pattern_before.txt |  30 ++++++
+ internal/cli/cli.go                              | 117 +++++++++++++----------
+ internal/cli/commands_test.go                    |  62 ++++++++++++
+ 4 files changed, 159 insertions(+), 52 deletions(-)
+
+$ grep -c "case \"" internal/cli/cli.go   (string-literal switch cases on command names)
+0
+
+$ printf "help\nquit\nadd never\n" | go run ./cmd/taskflow
+TaskFlow — трекер задач. Воркеров: 3, очередь: 10. Введите help, чтобы увидеть команды.
+> Команды:
+  add <название> [!low|!medium|!high] [#тег ...] [@ГГГГ-ММ-ДД] [| описание]  создать задачу
+  submit <id> [id ...]                                                       отправить задачи на анализ воркерам
+  list [статус] [!приоритет] [#тег]                                          список (статусы: todo, queued, in_progress, done, failed, cancelled)
+  show <id>                                                                  подробности и результат анализа
+  cancel <id>                                                                отменить задачу
+  reopen <id>                                                                вернуть задачу в todo (из failed или cancelled)
+  delete <id>                                                                удалить задачу
+  overdue                                                                    просроченные задачи
+  stats                                                                      статусы задач и состояние очереди
+  help                                                                       эта справка
+  exit | quit                                                                выход (воркеры доделают задачи из очереди)
+> Останавливаю воркеры и жду задачи из очереди...
+Все воркеры завершились.
+[exit code: 0]
