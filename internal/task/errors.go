@@ -9,6 +9,8 @@ var (
 	ErrNotFound          = errors.New("task not found")
 	ErrInvalidTransition = errors.New("invalid status transition")
 	ErrValidation        = errors.New("validation failed")
+	ErrTaskBusy          = errors.New("task is queued or being processed")
+	ErrNothingToAnalyze  = errors.New("description has no words to analyze")
 )
 
 type TransitionError struct {

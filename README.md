@@ -1,90 +1,211 @@
-# TaskFlow — Checkpoint 1 (Core Golang)
+# TaskFlow — Checkpoint 2 (Concurrent Processing)
 
-Консольный трекер задач со статусами. Хранение в памяти, без конкурентности.
-Нужен Go 1.22 или новее. Все команды запускаются из папки `taskflow`, где лежит `go.mod`.
+Консольный трекер задач. Каждую задачу можно отправить на **анализ описания**, и этот анализ выполняет **пул воркеров** в фоне.
+Данные хранятся в памяти. Нужен Go 1.22 или новее. Все команды запускаются из папки, где лежит `go.mod`.
 
-## Запуск
+## 1. Что делает приложение
+
+Задача (`task.Task`) — это пункт трекера: название, описание, приоритет, теги и дедлайн (всё это есть с Checkpoint 1).
+
+**Обработка задачи** — анализ её описания (`task.Analyze`). Результат сохраняется в самой задаче (`Task.Result`):
+
+| Поле результата | Что считается |
+|---|---|
+| `Words` | количество слов (буквы и цифры, регистр не важен) |
+| `Characters` | количество символов, то есть рун, а не байтов: кириллица считается правильно |
+| `UniqueWords` | количество разных слов |
+| `Keywords` | до 3 самых частых слов длиной от 4 букв; при равном количестве — по алфавиту |
+
+Если в описании нет ни одного слова, анализ невозможен, и задача переходит в статус `failed` с причиной `description has no words to analyze`.
+
+## 2. Как задачи создаются и отправляются
+
+1. `add` создаёт задачу. Данные проверяются (`task.New`), задача получает уникальный ID и статус `todo`.
+2. `submit <id>` отправляет задачу на анализ:
+   - статус атомарно меняется `todo → queued` (одна операция под блокировкой хранилища);
+   - ID задачи кладётся в очередь пула;
+   - `submit` сразу возвращается и не ждёт, пока воркер закончит.
+3. Воркер достаёт ID из очереди, переводит задачу в `in_progress`, анализирует описание и сохраняет результат (`done`) или ошибку (`failed`).
+
+## 3–6. Пул воркеров и очередь
+
+```
+ submit(id)                                  ┌──────────► Воркер 1 ──┐
+     │ 1. todo → queued (под Lock)          │                        │ 3. queued → in_progress
+     ▼                                       │                        │ 4. анализ (без блокировок)
+ ┌──────────────────────────────┐            ├──────────► Воркер 2 ──┤ 5. → done / failed
+ │ Очередь: chan task.ID         │ ─ range ──┤                        │
+ │ буферизованный, ёмкость 10    │            └──────────► Воркер 3 ──┘
+ └──────────────────────────────┘                                     │
+     2. отправка без блокировки (select/default)                       ▼
+                                                    ┌──────────────────────────────────┐
+                                                    │ MemoryStore                       │
+                                                    │ map[ID]Task + sync.RWMutex        │
+                                                    └──────────────────────────────────┘
+```
+
+| Параметр | Значение |
+|---|---|
+| Воркеров | **3** по умолчанию (флаг `-workers`, минимум 2) |
+| Вместимость очереди | **10** по умолчанию (флаг `-queue`) |
+| Очередь | буферизованный канал `chan task.ID` (`internal/worker/pool.go`) |
+| Воркеры | создаются один раз в `worker.NewPool` и читают канал в цикле `for id := range queue` |
+
+- Число горутин фиксировано: на каждую задачу новая горутина не создаётся.
+- В очереди лежит **ID**, а не копия задачи: воркер берёт актуальное состояние из хранилища.
+- Порядок завершения задач не гарантирован, и код от него не зависит.
+
+**Когда очередь заполнена**, задача отклоняется (вариант A из спецификации):
+
+- `Pool.Submit` делает отправку через `select { case queue <- id: ... default: return ErrQueueFull }` и поэтому никогда не блокируется;
+- сервис возвращает задачу из `queued` обратно в `todo` и возвращает ошибку `queue is full`;
+- задачу можно отправить ещё раз позже. В `in_progress` она не попадает.
+
+Блокирующая отправка здесь не используется, чтобы вызывающий не мог зависнуть навсегда, если пул уже остановлен.
+
+## 7. Статусы задачи
+
+| Статус | Значит |
+|---|---|
+| `todo` | создана, ещё не отправлена (Pending) |
+| `queued` | принята в очередь, ждёт воркера |
+| `in_progress` | воркер анализирует её прямо сейчас (Processing) |
+| `done` | анализ завершён, результат сохранён (Completed) |
+| `failed` | анализ не удался, причина сохранена в `FailReason` |
+| `cancelled` | отменена пользователем |
+
+| Откуда | Куда можно | Кто делает |
+|---|---|---|
+| todo | queued, cancelled | `submit`, `cancel` |
+| queued | in_progress | воркер |
+| queued | todo | откат, если очередь полна или пул остановлен |
+| in_progress | done, failed | воркер |
+| failed, cancelled | todo | `reopen` (повторная попытка) |
+| done | — | финальный статус |
+
+Все переходы описаны в таблице `transitions` (`internal/task/status.go`), любой другой переход возвращает `ErrInvalidTransition`. Поэтому:
+
+- повторный `submit` задачи в `queued` или `in_progress` даёт ошибку, и одну задачу не могут обработать два воркера;
+- `submit` задачи в `done` даёт ошибку;
+- удалить задачу в `queued` или `in_progress` нельзя (`ErrTaskBusy`);
+- `reopen` разрешён только из `failed` и `cancelled`.
+
+## 8. Синхронизация общих данных
+
+| Общие данные | Кто к ним обращается | Чем защищены |
+|---|---|---|
+| `map` задач и счётчик `lastID` в `MemoryStore` | CLI, `Submit`, все воркеры | `sync.RWMutex`: `Lock` для записи, `RLock` для `Get`/`List` |
+| Флаг `stopped` и отправка в канал в `Pool` | `Submit` и `Stop` из разных горутин | `sync.Mutex` |
+| Очередь | `Submit` пишет, воркеры читают | сам канал |
+| Ожидание завершения воркеров | `Stop` | `sync.WaitGroup` |
+
+- **Проверка и изменение статуса — одна операция.** `MemoryStore.Update(id, change)` под одним `Lock` читает задачу, вызывает `change` и сохраняет результат. Если бы проверка и запись шли отдельными вызовами, две горутины могли бы одновременно увидеть `todo` и обе поставить задачу в очередь. Это проверяет тест `TestSubmit_SameTaskFromManyGoroutines`.
+- **Наружу отдаются только копии.** В map лежат значения `task.Task`, а не указатели. `Get`, `List` и `Update` возвращают `Clone()`, и слайсы (`Tags`, `Keywords`) тоже копируются. Поэтому изменяемые поля задач не разделяются между горутинами.
+- **Анализ выполняется без блокировки.** Воркер держит `Lock` только на время смены статуса; сам `Process` работает без блокировок, поэтому чтение и другие задачи не ждут.
+- **Взаимоблокировок нет.** `change` внутри `Update` не обращается к хранилищу повторно (мьютекс в Go не реентерабельный), и ни один код не держит две блокировки одновременно.
+
+## 9. Остановка воркеров
+
+`Service.Shutdown()` → `Pool.Stop()`:
+
+1. Под `mu` ставится `stopped = true` и закрывается канал. Канал закрывает только пул, потому что только он в него пишет.
+2. С этого момента `Submit` возвращает `ErrStopped`. Задача при этом возвращается в `todo` и не теряется.
+3. Воркеры дочитывают всё, что уже лежит в канале: `range` по закрытому каналу заканчивается, только когда канал пуст. Принятые задачи не пропадают.
+4. `wg.Wait()` ждёт, пока все воркеры выйдут.
+
+Повторный вызов `Stop` безопасен: канал уже закрыт, вызов просто дожидается воркеров. Паники `send on closed channel` не будет, потому что проверка `stopped` и отправка выполняются под тем же мьютексом, что и закрытие. Отправка не блокируется (`select`/`default`), поэтому удерживание мьютекса не может привести к взаимоблокировке со `Stop`.
+
+При выходе из программы (`exit` или конец ввода) `main` вызывает `Shutdown` через `defer`.
+
+## 10. Запуск
 
 | Что | Команда |
 |---|---|
 | Запустить с демо-задачами | `go run ./cmd/taskflow -demo` |
-| Запустить пустым | `go run ./cmd/taskflow` |
+| Свои настройки пула | `go run ./cmd/taskflow -demo -workers 4 -queue 20` |
+| Маленькая очередь, чтобы увидеть отказ | `go run ./cmd/taskflow -demo -workers 2 -queue 1`, затем `submit 1 2 3 4` |
 | Все тесты | `go test ./...` |
-| Тесты с покрытием | `go test -cover ./...` |
-| Подробно, с именами тестов | `go test -v ./internal/task` |
-| Проверки компилятора | `go build ./...` и `go vet ./...` |
+| Тесты с детектором гонок | `go test -race ./...` |
+| Тесты пула подробно | `go test -race -v ./internal/worker` |
+| Проверки | `gofmt -l .` и `go vet ./...` |
 
-**GoLand:** открой `cmd/taskflow/main.go` → зелёный ▶ рядом с `func main()` → Run.
-Чтобы передать `-demo`: Run → Edit Configurations → Program arguments → `-demo`.
-Тесты: правый клик по папке `internal` → Run 'go test internal/...' (или ▶ рядом с любой `func TestXxx`).
+**GoLand:** открой `cmd/taskflow/main.go` и нажми зелёный ▶ рядом с `func main()`. Флаги задаются в Run → Edit Configurations → Program arguments.
 
-## Команды в программе
+### Команды в программе
 
 ```
-add <название> [!low|!medium|!high] [#тег ...] [@ГГГГ-ММ-ДД]   создать задачу
-list [статус] [!приоритет] [#тег]                              список с фильтрами
-show <id>                                                      подробности
-start <id> | done <id> | cancel <id> | reopen <id>             сменить статус
-delete <id>                                                    удалить
-overdue                                                        просроченные
-stats                                                          статистика по статусам
-help, exit
+add <название> [!low|!medium|!high] [#тег ...] [@ГГГГ-ММ-ДД] [| описание]
+submit <id> [id ...]          отправить задачи на анализ
+list [статус] [!приоритет] [#тег]
+show <id>                     подробности и результат анализа
+cancel <id> | reopen <id>
+delete <id>
+overdue | stats | help | exit
 ```
 
-Пример сессии (`go run ./cmd/taskflow -demo`):
+### Пример сессии
 
 ```
+$ go run ./cmd/taskflow -demo
+> submit 1 2 3 4 5
+задача #1 в очереди
+задача #2 в очереди
+задача #3 в очереди
+задача #4 в очереди
+ошибка: нельзя перевести задачу #5 из cancelled в queued (submit: task 5: cancelled -> queued: invalid status transition)
 > list
-#1   in_progress  high    Подготовиться к защите Checkpoint 1  #go #study  до 13.10.2026
-#2   done         high    Написать unit-тесты  #go
-#3   todo         low     Прочитать про горутины  #go #reading
-#4   cancelled    low     Купить продукты
-> start 2
-ошибка: нельзя перевести задачу #2 из done в in_progress (start: task 2: done -> in_progress: invalid status transition)
-> stats
-  todo         1
-  in_progress  1
-  done         1
-  cancelled    1
-  всего        4
+#1   done         high    Подготовиться к защите Checkpoint 2  #go #study  до 24.11.2026  [20 слов, воркер 3]
+#2   done         high    Написать тесты для пула  #go  [20 слов, воркер 1]
+#3   done         low     Прочитать про горутины  #go #reading  [9 слов, воркер 2]
+#4   failed       medium  Позвонить в деканат  [ошибка анализа, воркер 3]
+#5   cancelled    low     Купить продукты
+> show 1
+  ...
+  анализ:    20 слов, 159 символов, 15 уникальных слов
+  ключевые:  воркеры, очередь, повторить
+  воркер:    3
+> submit 1
+ошибка: нельзя перевести задачу #1 из done в queued (submit: task 1: done -> queued: invalid status transition)
+> exit
+Останавливаю воркеры и жду задачи из очереди...
+Все воркеры завершились.
 ```
 
-## Статусы и переходы
+Номера воркеров в выводе зависят от планировщика и меняются от запуска к запуску.
 
-| Откуда | Куда можно |
+## Тесты
+
+| Требование спецификации (раздел 9) | Тест |
 |---|---|
-| todo | in_progress, cancelled |
-| in_progress | todo, done, cancelled |
-| done | — |
-| cancelled | todo |
+| 1. Запуск пула | `TestPool_StartsAndProcessesAllTasks`, `TestNewPool_InvalidConfig` |
+| 2–3. Асинхронная отправка, много задач | `TestSubmit_ProcessesTasksAndStoresTheirOwnResults` |
+| 4. Задачи действительно обрабатываются одновременно | `TestPool_ProcessesTasksConcurrently`, `TestSubmit_DoesNotWaitAndTasksRunConcurrently` |
+| 5–6. Правильные результаты и статусы | `TestSubmit_ProcessesTasksAndStoresTheirOwnResults`, `TestSubmit_ProcessingFailureMarksTaskFailed`, `TestAnalyze` |
+| 7. Повторная и недопустимая отправка | `TestSubmit_RejectsInvalidStates`, `TestSubmit_SameTaskFromManyGoroutines` |
+| 8. Полная очередь | `TestPool_RejectsWhenQueueFull`, `TestSubmit_QueueFullKeepsTaskInTodo` |
+| 9. Безопасный конкурентный доступ | `TestUpdate_IsAtomic`, `TestUpdate_NoLostUpdates`, `TestConcurrentReadsDuringProcessing`, `TestConcurrentCreateGivesUniqueIDs` |
+| 10. Остановка воркеров | `TestPool_StopFinishesAcceptedTasks`, `TestPool_WorkersExitAfterStop`, `TestShutdown_FinishesAcceptedTasksAndRejectsNewOnes` |
+| 11. Отказ после остановки | `TestPool_SubmitAfterStopAndDoubleStop`, `TestPool_ConcurrentSubmitAndStop` |
+| Лимит одновременной работы | `TestPool_RespectsWorkerLimit`: при 3 воркерах одновременно работают ровно 3 задачи |
+
+Тесты не зависят от порядка завершения задач и не используют `time.Sleep`. Чтобы задача «зависла» в воркере, тестовый обработчик ждёт сигнала из канала `release`. Таймаут в 2 секунды используется только как страховка от зависшего теста.
 
 ## Структура
 
 ```
 taskflow/
-├── cmd/taskflow/main.go        сборка приложения: store → service → cli
+├── cmd/taskflow/main.go        сборка приложения, флаги, Shutdown при выходе
 └── internal/
-    ├── task/                   доменная модель (ни от чего не зависит)
-    │   ├── task.go             Task, Params, New, TransitionTo, IsOverdue, Clone
-    │   ├── status.go           Status + таблица переходов (конечный автомат)
-    │   ├── priority.go         Priority
-    │   └── errors.go           ErrNotFound, ErrInvalidTransition, ErrValidation,
-    │                           TransitionError, ValidationError
-    ├── storage/memory.go       MemoryStore: map[task.ID]task.Task
-    ├── service/service.go      интерфейсы Repository и Clock, Service, Filter
-    └── cli/cli.go              команды; читает io.Reader, пишет в io.Writer
+    ├── task/                   доменная модель
+    │   ├── task.go             Task, New, TransitionTo, Start, Complete, Fail, Reopen, Clone
+    │   ├── status.go           статусы и таблица переходов
+    │   ├── analysis.go         Analyze — обработка задачи
+    │   ├── priority.go
+    │   └── errors.go
+    ├── storage/memory.go       MemoryStore: map + RWMutex, атомарный Update
+    ├── worker/pool.go          пул: очередь-канал, воркеры, Submit, Stop
+    ├── service/service.go      Submit, process (работа воркера), Shutdown, фильтры, статистика
+    └── cli/cli.go              команды
 ```
 
-Зависимости идут в одну сторону: `cli → service → task ← storage`.
-`service` не импортирует `storage` — он знает только интерфейс `Repository`.
-
-## Где в коде каждое требование
-
-| Требование | Где |
-|---|---|
-| Доменная модель задач и состояний | `task.Task`, `task.Status` + `transitions`, `task.Priority` |
-| Структуры и методы | `Task` (методы на `*Task`), `Status`/`Priority`/`Filter` (методы по значению), `MemoryStore`, `Service` |
-| Интерфейсы | `service.Repository`, `service.Clock`, `fmt.Stringer` (Status, Priority), `error` (TransitionError, ValidationError), `io.Reader`/`io.Writer` (cli) |
-| In-memory хранилище | `storage.MemoryStore`: `map[task.ID]task.Task` + сортировка слайса в `List` |
-| Обработка ошибок | sentinel-ошибки, свои типы с `Unwrap`, оборачивание через `%w`, `errors.Is` / `errors.As` в CLI |
-| Unit-тесты | 50 тестов (+41 подтест), табличные; покрытие: task, storage, service — 100%, cli — 94% |
+`service` не импортирует `storage`: хранилище он знает только через интерфейс `Repository`, а связывает их `main`. Пакеты `storage` и `worker` ничего не знают о `service`.

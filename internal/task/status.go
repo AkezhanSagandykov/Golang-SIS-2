@@ -10,30 +10,38 @@ type Status int
 
 const (
 	StatusTodo Status = iota + 1
+	StatusQueued
 	StatusInProgress
 	StatusDone
+	StatusFailed
 	StatusCancelled
 )
 
 var transitions = map[Status][]Status{
-	StatusTodo:       {StatusInProgress, StatusCancelled},
-	StatusInProgress: {StatusTodo, StatusDone, StatusCancelled},
+	StatusTodo:       {StatusQueued, StatusCancelled},
+	StatusQueued:     {StatusInProgress, StatusTodo},
+	StatusInProgress: {StatusDone, StatusFailed},
 	StatusDone:       {},
+	StatusFailed:     {StatusTodo},
 	StatusCancelled:  {StatusTodo},
 }
 
 func AllStatuses() []Status {
-	return []Status{StatusTodo, StatusInProgress, StatusDone, StatusCancelled}
+	return []Status{StatusTodo, StatusQueued, StatusInProgress, StatusDone, StatusFailed, StatusCancelled}
 }
 
 func (s Status) String() string {
 	switch s {
 	case StatusTodo:
 		return "todo"
+	case StatusQueued:
+		return "queued"
 	case StatusInProgress:
 		return "in_progress"
 	case StatusDone:
 		return "done"
+	case StatusFailed:
+		return "failed"
 	case StatusCancelled:
 		return "cancelled"
 	default:
@@ -48,6 +56,10 @@ func (s Status) IsValid() bool {
 
 func (s Status) IsClosed() bool {
 	return s == StatusDone || s == StatusCancelled
+}
+
+func (s Status) IsBusy() bool {
+	return s == StatusQueued || s == StatusInProgress
 }
 
 func (s Status) CanTransitionTo(to Status) bool {

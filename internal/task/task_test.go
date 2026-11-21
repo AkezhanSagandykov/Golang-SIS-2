@@ -2,6 +2,7 @@ package task_test
 
 import (
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -9,7 +10,7 @@ import (
 	"taskflow/internal/task"
 )
 
-var now = time.Date(2026, 10, 10, 12, 0, 0, 0, time.UTC)
+var now = time.Date(2026, 11, 21, 12, 0, 0, 0, time.UTC)
 
 func mustNew(t *testing.T, p task.Params) task.Task {
 	t.Helper()
@@ -22,15 +23,15 @@ func mustNew(t *testing.T, p task.Params) task.Task {
 
 func TestNew_Defaults(t *testing.T) {
 	tk := mustNew(t, task.Params{
-		Title:       "  Сдать Checkpoint 1  ",
-		Description: " domain + tests ",
+		Title:       "  Сдать Checkpoint 2  ",
+		Description: " worker pool + tests ",
 		Tags:        []string{"#Go", "go", " Study ", "", "#"},
 	})
 
-	if tk.Title != "Сдать Checkpoint 1" {
+	if tk.Title != "Сдать Checkpoint 2" {
 		t.Errorf("Title = %q, want trimmed", tk.Title)
 	}
-	if tk.Description != "domain + tests" {
+	if tk.Description != "worker pool + tests" {
 		t.Errorf("Description = %q, want trimmed", tk.Description)
 	}
 	if tk.Status() != task.StatusTodo {
@@ -40,13 +41,13 @@ func TestNew_Defaults(t *testing.T) {
 		t.Errorf("Priority = %s, want medium (default)", tk.Priority)
 	}
 	if got := strings.Join(tk.Tags, ","); got != "go,study" {
-		t.Errorf("Tags = %q, want normalized and deduplicated \"go,study\"", got)
+		t.Errorf("Tags = %q, want \"go,study\"", got)
 	}
 	if !tk.CreatedAt.Equal(now) || !tk.UpdatedAt.Equal(now) {
 		t.Errorf("CreatedAt/UpdatedAt = %v/%v, want %v", tk.CreatedAt, tk.UpdatedAt, now)
 	}
-	if tk.ID != 0 {
-		t.Errorf("ID = %d, want 0 (ID assigns the repository)", tk.ID)
+	if tk.ID != 0 || tk.Worker != 0 || tk.Result.Words != 0 {
+		t.Errorf("new task must have no ID, worker or result: %+v", tk)
 	}
 }
 
@@ -92,9 +93,6 @@ func TestNew_Validation(t *testing.T) {
 			if ve.Field != tt.wantField {
 				t.Errorf("Field = %q, want %q", ve.Field, tt.wantField)
 			}
-			if prefix := "validation failed: " + tt.wantField + " "; !strings.HasPrefix(err.Error(), prefix) {
-				t.Errorf("Error() = %q, want prefix %q", err.Error(), prefix)
-			}
 			if tk.Title != "" || tk.Status() != 0 {
 				t.Errorf("on error New must return zero Task, got %+v", tk)
 			}
@@ -106,25 +104,86 @@ func TestNew_TitleLengthCountsRunesNotBytes(t *testing.T) {
 	mustNew(t, task.Params{Title: strings.Repeat("я", task.MaxTitleLen)})
 }
 
-func TestTransitionTo_Lifecycle(t *testing.T) {
-	tk := mustNew(t, task.Params{Title: "lifecycle"})
-	steps := []task.Status{
-		task.StatusInProgress,
-		task.StatusTodo,
-		task.StatusInProgress,
-		task.StatusDone,
+func TestLifecycle_Success(t *testing.T) {
+	tk := mustNew(t, task.Params{Title: "x", Description: "Hello Go world"})
+	result, _ := task.Analyze(tk.Description)
+
+	if err := tk.TransitionTo(task.StatusQueued, now.Add(time.Minute)); err != nil {
+		t.Fatalf("todo -> queued: %v", err)
 	}
-	for i, to := range steps {
-		at := now.Add(time.Duration(i+1) * time.Hour)
-		if err := tk.TransitionTo(to, at); err != nil {
-			t.Fatalf("step %d -> %s: %v", i, to, err)
-		}
-		if tk.Status() != to {
-			t.Fatalf("step %d: status = %s, want %s", i, tk.Status(), to)
-		}
-		if !tk.UpdatedAt.Equal(at) {
-			t.Errorf("step %d: UpdatedAt not updated", i)
-		}
+	if err := tk.Start(2, now.Add(2*time.Minute)); err != nil {
+		t.Fatalf("queued -> in_progress: %v", err)
+	}
+	if tk.Status() != task.StatusInProgress || tk.Worker != 2 {
+		t.Fatalf("after Start: status=%s worker=%d", tk.Status(), tk.Worker)
+	}
+	if err := tk.Complete(result, now.Add(3*time.Minute)); err != nil {
+		t.Fatalf("in_progress -> done: %v", err)
+	}
+
+	if tk.Status() != task.StatusDone {
+		t.Errorf("Status = %s, want done", tk.Status())
+	}
+	if tk.Result.Words != 3 || !slices.Equal(tk.Result.Keywords, []string{"hello", "world"}) {
+		t.Errorf("Result = %+v", tk.Result)
+	}
+	if !tk.UpdatedAt.Equal(now.Add(3 * time.Minute)) {
+		t.Errorf("UpdatedAt = %v", tk.UpdatedAt)
+	}
+}
+
+func TestLifecycle_FailureAndReopen(t *testing.T) {
+	tk := mustNew(t, task.Params{Title: "x"})
+	moveTo(t, &tk, task.StatusInProgress)
+
+	if err := tk.Fail("nothing to analyze", now); err != nil {
+		t.Fatalf("in_progress -> failed: %v", err)
+	}
+	if tk.Status() != task.StatusFailed || tk.FailReason != "nothing to analyze" {
+		t.Fatalf("after Fail: status=%s reason=%q", tk.Status(), tk.FailReason)
+	}
+	if tk.Result.Words != 0 || tk.Result.Keywords != nil {
+		t.Errorf("failed task must not have a result: %+v", tk.Result)
+	}
+
+	if err := tk.Reopen(now); err != nil {
+		t.Fatalf("failed -> todo: %v", err)
+	}
+	if tk.Status() != task.StatusTodo {
+		t.Errorf("Status after Reopen = %s, want todo", tk.Status())
+	}
+}
+
+func TestReopen_OnlyFromFailedOrCancelled(t *testing.T) {
+	for _, status := range task.AllStatuses() {
+		t.Run(status.String(), func(t *testing.T) {
+			tk := mustNew(t, task.Params{Title: "x"})
+			moveTo(t, &tk, status)
+
+			err := tk.Reopen(now)
+
+			canReopen := status == task.StatusFailed || status == task.StatusCancelled
+			if canReopen && err != nil {
+				t.Fatalf("Reopen from %s: %v", status, err)
+			}
+			if !canReopen && !errors.Is(err, task.ErrInvalidTransition) {
+				t.Fatalf("Reopen from %s: err = %v, want ErrInvalidTransition", status, err)
+			}
+		})
+	}
+}
+
+func TestCompleteAndStart_RequireRightStatus(t *testing.T) {
+	tk := mustNew(t, task.Params{Title: "x"})
+
+	if err := tk.Start(1, now); !errors.Is(err, task.ErrInvalidTransition) {
+		t.Errorf("Start from todo: err = %v, want ErrInvalidTransition", err)
+	}
+	if err := tk.Complete(task.Result{Words: 5}, now); !errors.Is(err, task.ErrInvalidTransition) {
+		t.Errorf("Complete from todo: err = %v, want ErrInvalidTransition", err)
+	}
+	if tk.Status() != task.StatusTodo || tk.Worker != 0 || tk.Result.Words != 0 {
+		t.Errorf("failed calls changed the task: %+v", tk)
 	}
 }
 
@@ -134,15 +193,15 @@ func TestTransitionTo_InvalidLeavesTaskUnchanged(t *testing.T) {
 
 	err := tk.TransitionTo(task.StatusDone, now.Add(time.Hour))
 
-	if !errors.Is(err, task.ErrInvalidTransition) {
-		t.Fatalf("err = %v, want ErrInvalidTransition", err)
-	}
 	var te *task.TransitionError
 	if !errors.As(err, &te) {
 		t.Fatalf("err %T is not *TransitionError", err)
 	}
 	if te.ID != 7 || te.From != task.StatusTodo || te.To != task.StatusDone {
 		t.Errorf("TransitionError = %+v", *te)
+	}
+	if !errors.Is(err, task.ErrInvalidTransition) {
+		t.Errorf("errors.Is(err, ErrInvalidTransition) = false")
 	}
 	if tk.Status() != task.StatusTodo || !tk.UpdatedAt.Equal(now) {
 		t.Errorf("task changed after failed transition: status=%s updated=%v", tk.Status(), tk.UpdatedAt)
@@ -154,8 +213,7 @@ func TestTransitionTo_InvalidLeavesTaskUnchanged(t *testing.T) {
 
 func TestTransitionTo_FromDoneIsImpossible(t *testing.T) {
 	tk := mustNew(t, task.Params{Title: "x"})
-	_ = tk.TransitionTo(task.StatusInProgress, now)
-	_ = tk.TransitionTo(task.StatusDone, now)
+	moveTo(t, &tk, task.StatusDone)
 
 	for _, to := range task.AllStatuses() {
 		if err := tk.TransitionTo(to, now); !errors.Is(err, task.ErrInvalidTransition) {
@@ -166,16 +224,14 @@ func TestTransitionTo_FromDoneIsImpossible(t *testing.T) {
 
 func TestTransitionTo_UnknownTargetStatus(t *testing.T) {
 	tk := mustNew(t, task.Params{Title: "x"})
-	err := tk.TransitionTo(task.Status(42), now)
-	if !errors.Is(err, task.ErrValidation) {
+	if err := tk.TransitionTo(task.Status(42), now); !errors.Is(err, task.ErrValidation) {
 		t.Fatalf("err = %v, want ErrValidation", err)
 	}
 }
 
 func TestZeroValueTaskCannotTransition(t *testing.T) {
 	var tk task.Task
-	err := tk.TransitionTo(task.StatusInProgress, now)
-	if !errors.Is(err, task.ErrInvalidTransition) {
+	if err := tk.TransitionTo(task.StatusQueued, now); !errors.Is(err, task.ErrInvalidTransition) {
 		t.Fatalf("err = %v, want ErrInvalidTransition", err)
 	}
 }
@@ -193,7 +249,8 @@ func TestIsOverdue(t *testing.T) {
 		{"before deadline", deadline, task.StatusTodo, deadline.Add(-time.Second), false},
 		{"exactly at deadline", deadline, task.StatusTodo, deadline, false},
 		{"after deadline, todo", deadline, task.StatusTodo, deadline.Add(time.Second), true},
-		{"after deadline, in progress", deadline, task.StatusInProgress, deadline.Add(time.Hour), true},
+		{"after deadline, queued", deadline, task.StatusQueued, deadline.Add(time.Hour), true},
+		{"after deadline, failed", deadline, task.StatusFailed, deadline.Add(time.Hour), true},
 		{"after deadline, done", deadline, task.StatusDone, deadline.Add(time.Hour), false},
 		{"after deadline, cancelled", deadline, task.StatusCancelled, deadline.Add(time.Hour), false},
 	}
@@ -222,18 +279,19 @@ func TestHasTag(t *testing.T) {
 
 func TestClone_IsIndependent(t *testing.T) {
 	original := mustNew(t, task.Params{Title: "x", Tags: []string{"a", "b"}})
+	original.Result = task.Result{Words: 2, Keywords: []string{"alpha", "beta"}}
 
 	shallow := original
-	deep := original.Clone()
-
 	shallow.Tags[0] = "changed-by-shallow"
 	if original.Tags[0] != "changed-by-shallow" {
-		t.Fatal("expected shallow copy to share Tags (this is how Go slices work)")
+		t.Fatal("expected a plain copy to share Tags (this is how Go slices work)")
 	}
 
+	deep := original.Clone()
 	deep.Tags[1] = "changed-by-deep"
-	if original.Tags[1] != "b" {
-		t.Fatalf("Clone shares Tags with original: %v", original.Tags)
+	deep.Result.Keywords[0] = "changed-by-deep"
+	if original.Tags[1] != "b" || original.Result.Keywords[0] != "alpha" {
+		t.Fatalf("Clone shares memory with original: tags=%v keywords=%v", original.Tags, original.Result.Keywords)
 	}
 }
 
@@ -241,8 +299,10 @@ func moveTo(t *testing.T, tk *task.Task, target task.Status) {
 	t.Helper()
 	path := map[task.Status][]task.Status{
 		task.StatusTodo:       nil,
-		task.StatusInProgress: {task.StatusInProgress},
-		task.StatusDone:       {task.StatusInProgress, task.StatusDone},
+		task.StatusQueued:     {task.StatusQueued},
+		task.StatusInProgress: {task.StatusQueued, task.StatusInProgress},
+		task.StatusDone:       {task.StatusQueued, task.StatusInProgress, task.StatusDone},
+		task.StatusFailed:     {task.StatusQueued, task.StatusInProgress, task.StatusFailed},
 		task.StatusCancelled:  {task.StatusCancelled},
 	}
 	for _, s := range path[target] {

@@ -2,17 +2,24 @@ package service
 
 import (
 	"fmt"
+	"log"
 	"slices"
 	"strings"
 	"time"
 
 	"taskflow/internal/task"
+	"taskflow/internal/worker"
+)
+
+const (
+	DefaultWorkers   = 3
+	DefaultQueueSize = 10
 )
 
 type Repository interface {
 	Create(t task.Task) (task.Task, error)
 	Get(id task.ID) (task.Task, error)
-	Update(t task.Task) error
+	Update(id task.ID, change func(t *task.Task) error) (task.Task, error)
 	Delete(id task.ID) error
 	List() ([]task.Task, error)
 }
@@ -25,16 +32,49 @@ type SystemClock struct{}
 
 func (SystemClock) Now() time.Time { return time.Now() }
 
+type Processor interface {
+	Process(t task.Task) (task.Result, error)
+}
+
+type DescriptionAnalyzer struct{}
+
+func (DescriptionAnalyzer) Process(t task.Task) (task.Result, error) {
+	return task.Analyze(t.Description)
+}
+
+type Config struct {
+	Workers   int
+	QueueSize int
+}
+
+type QueueInfo struct {
+	Workers  int
+	Queued   int
+	Capacity int
+}
+
 type Service struct {
 	repo  Repository
 	clock Clock
+	proc  Processor
+	pool  *worker.Pool
 }
 
-func New(repo Repository, clock Clock) *Service {
+func New(repo Repository, clock Clock, proc Processor, cfg Config) (*Service, error) {
 	if clock == nil {
 		clock = SystemClock{}
 	}
-	return &Service{repo: repo, clock: clock}
+	if proc == nil {
+		proc = DescriptionAnalyzer{}
+	}
+	s := &Service{repo: repo, clock: clock, proc: proc}
+
+	pool, err := worker.NewPool(cfg.Workers, cfg.QueueSize, s.process)
+	if err != nil {
+		return nil, fmt.Errorf("new service: %w", err)
+	}
+	s.pool = pool
+	return s, nil
 }
 
 func (s *Service) Create(p task.Params) (task.Task, error) {
@@ -57,32 +97,76 @@ func (s *Service) Get(id task.ID) (task.Task, error) {
 	return t, nil
 }
 
-func (s *Service) Start(id task.ID) (task.Task, error) {
-	return s.changeStatus("start", id, task.StatusInProgress)
+func (s *Service) Submit(id task.ID) (task.Task, error) {
+	queued, err := s.repo.Update(id, func(t *task.Task) error {
+		return t.TransitionTo(task.StatusQueued, s.clock.Now())
+	})
+	if err != nil {
+		return task.Task{}, fmt.Errorf("submit: %w", err)
+	}
+
+	if err := s.pool.Submit(id); err != nil {
+		_, undoErr := s.repo.Update(id, func(t *task.Task) error {
+			return t.TransitionTo(task.StatusTodo, s.clock.Now())
+		})
+		if undoErr != nil {
+			return task.Task{}, fmt.Errorf("submit: task %d: %w; undo: %w", id, err, undoErr)
+		}
+		return task.Task{}, fmt.Errorf("submit: task %d: %w", id, err)
+	}
+	return queued, nil
 }
 
-func (s *Service) Complete(id task.ID) (task.Task, error) {
-	return s.changeStatus("complete", id, task.StatusDone)
+func (s *Service) process(workerID int, id task.ID) {
+	t, err := s.repo.Update(id, func(t *task.Task) error {
+		return t.Start(workerID, s.clock.Now())
+	})
+	if err != nil {
+		log.Printf("worker %d: skip task %d: %v", workerID, id, err)
+		return
+	}
+
+	result, procErr := s.proc.Process(t)
+
+	_, err = s.repo.Update(id, func(t *task.Task) error {
+		if procErr != nil {
+			return t.Fail(procErr.Error(), s.clock.Now())
+		}
+		return t.Complete(result, s.clock.Now())
+	})
+	if err != nil {
+		log.Printf("worker %d: save task %d: %v", workerID, id, err)
+	}
+}
+
+func (s *Service) Shutdown() {
+	s.pool.Stop()
+}
+
+func (s *Service) Queue() QueueInfo {
+	return QueueInfo{
+		Workers:  s.pool.Workers(),
+		Queued:   s.pool.Queued(),
+		Capacity: s.pool.Capacity(),
+	}
 }
 
 func (s *Service) Cancel(id task.ID) (task.Task, error) {
-	return s.changeStatus("cancel", id, task.StatusCancelled)
+	t, err := s.repo.Update(id, func(t *task.Task) error {
+		return t.TransitionTo(task.StatusCancelled, s.clock.Now())
+	})
+	if err != nil {
+		return task.Task{}, fmt.Errorf("cancel: %w", err)
+	}
+	return t, nil
 }
 
 func (s *Service) Reopen(id task.ID) (task.Task, error) {
-	return s.changeStatus("reopen", id, task.StatusTodo)
-}
-
-func (s *Service) changeStatus(op string, id task.ID, to task.Status) (task.Task, error) {
-	t, err := s.repo.Get(id)
+	t, err := s.repo.Update(id, func(t *task.Task) error {
+		return t.Reopen(s.clock.Now())
+	})
 	if err != nil {
-		return task.Task{}, fmt.Errorf("%s: %w", op, err)
-	}
-	if err := t.TransitionTo(to, s.clock.Now()); err != nil {
-		return task.Task{}, fmt.Errorf("%s: %w", op, err)
-	}
-	if err := s.repo.Update(t); err != nil {
-		return task.Task{}, fmt.Errorf("%s: %w", op, err)
+		return task.Task{}, fmt.Errorf("reopen: %w", err)
 	}
 	return t, nil
 }

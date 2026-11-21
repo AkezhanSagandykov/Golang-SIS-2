@@ -4,27 +4,46 @@ import (
 	"bytes"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"taskflow/internal/cli"
 	"taskflow/internal/service"
 	"taskflow/internal/storage"
+	"taskflow/internal/task"
 )
 
 type fixedClock struct{ now time.Time }
 
 func (c fixedClock) Now() time.Time { return c.now }
 
-func run(t *testing.T, script string) string {
+var today = time.Date(2026, 11, 21, 12, 0, 0, 0, time.UTC)
+
+type app struct {
+	svc *service.Service
+	cli *cli.CLI
+	out *bytes.Buffer
+}
+
+func newApp(t *testing.T, proc service.Processor, queueSize int) *app {
 	t.Helper()
-	clock := fixedClock{now: time.Date(2026, 10, 10, 12, 0, 0, 0, time.UTC)}
-	svc := service.New(storage.NewMemoryStore(), clock)
-	var out bytes.Buffer
-	if err := cli.New(svc, &out, clock).Run(strings.NewReader(script)); err != nil {
+	clock := fixedClock{now: today}
+	svc, err := service.New(storage.NewMemoryStore(), clock, proc, service.Config{Workers: 2, QueueSize: queueSize})
+	if err != nil {
+		t.Fatalf("service.New: %v", err)
+	}
+	t.Cleanup(svc.Shutdown)
+	out := &bytes.Buffer{}
+	return &app{svc: svc, cli: cli.New(svc, out, clock), out: out}
+}
+
+func (a *app) run(t *testing.T, script string) string {
+	t.Helper()
+	if err := a.cli.Run(strings.NewReader(script)); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	return out.String()
+	return a.out.String()
 }
 
 func assertContains(t *testing.T, out string, wants ...string) {
@@ -36,40 +55,42 @@ func assertContains(t *testing.T, out string, wants ...string) {
 	}
 }
 
-func TestCLI_HappyPath(t *testing.T) {
-	out := run(t, `
-add Подготовиться к защите !high #go #Study @2026-10-13
-add Купить продукты !low
-start 1
-list
-done 1
-list done
-show 1
-cancel 2
-stats
+func TestCLI_AddSubmitAndShowResult(t *testing.T) {
+	a := newApp(t, nil, 5)
+	a.run(t, `
+add Подготовиться к защите !high #go #Study @2026-11-24 | Повторить пул воркеров, очередь и пул тестов.
+add Позвонить в деканат
+submit 1 2
 `)
+	a.svc.Shutdown()
+	out := a.run(t, "list\nshow 1\nshow 2\nstats\n")
+
 	assertContains(t, out,
 		"создана задача #1",
 		"создана задача #2",
-		"задача #1: in_progress",
-		"#1   in_progress  high    Подготовиться к защите  #go #study  до 13.10.2026",
-		"#2   todo         low     Купить продукты",
-		"задача #1: done",
+		"задача #1 в очереди",
+		"задача #2 в очереди",
+		"#1   done         high    Подготовиться к защите  #go #study  до 24.11.2026  [7 слов, воркер ",
+		"#2   failed       medium  Позвонить в деканат  [ошибка анализа, воркер ",
 		"статус:    done",
-		"теги:      #go #study",
-		"задача #2: cancelled",
-		"todo         0",
+		"описание:  Повторить пул воркеров, очередь и пул тестов.",
+		"анализ:    7 слов, 45 символов, 6 уникальных слов",
+		"ключевые:  воркеров, очередь, повторить",
+		"ошибка:    description has no words to analyze",
 		"done         1",
-		"cancelled    1",
+		"failed       1",
 		"всего        2",
+		"очередь:     0 из 5, воркеров: 2",
 	)
 }
 
 func TestCLI_ListFilters(t *testing.T) {
-	out := run(t, `
+	a := newApp(t, nil, 5)
+	out := a.run(t, `
 add a !high #go
 add b !low #go
 add c !high
+cancel 2
 list !high #go
 `)
 	last := out[strings.LastIndex(out, "> #"):]
@@ -77,54 +98,118 @@ list !high #go
 	if strings.Contains(last, "#2 ") || strings.Contains(last, "#3 ") {
 		t.Errorf("filter returned extra tasks:\n%s", last)
 	}
+	assertContains(t, a.run(t, "list cancelled\n"), "#2   cancelled")
 }
 
 func TestCLI_Errors(t *testing.T) {
-	out := run(t, `
+	a := newApp(t, nil, 5)
+	out := a.run(t, `
 add
 add x !urgent
-add y @13.10.2026
+add y @24.11.2026
 add z @2020-01-01
-start 99
-start abc
-start
+show 99
+show abc
+submit
+submit abc 99
 list blocked
+start 1
 foo
-add ok
-done 1
-delete 1
-delete 1
-list
+add ok | текст
+cancel 1
 `)
 	assertContains(t, out,
 		"ошибка: некорректное поле title",
 		"ошибка: некорректное поле priority",
-		`ошибка: некорректная дата "13.10.2026"`,
+		`ошибка: некорректная дата "24.11.2026"`,
 		"ошибка: некорректное поле deadline",
-		"ошибка: задача не найдена (start: task 99: task not found)",
+		"ошибка: задача не найдена (get: task 99: task not found)",
 		`ошибка: некорректный id "abc"`,
-		"ошибка: нужно указать один id",
+		"ошибка: нужно указать хотя бы один id",
+		"ошибка: задача не найдена (submit: task 99: task not found)",
 		"ошибка: некорректное поле status",
+		`ошибка: неизвестная команда "start"`,
 		`ошибка: неизвестная команда "foo"`,
-		"ошибка: нельзя перевести задачу #1 из todo в done (complete: task 1: todo -> done: invalid status transition)",
-		"задача #1 удалена",
-		"ошибка: задача не найдена (delete: task 1: task not found)",
-		"задач нет",
+		"задача #1: cancelled",
 	)
 }
 
+func TestCLI_InvalidStatesAfterProcessing(t *testing.T) {
+	a := newApp(t, nil, 5)
+	a.run(t, "add ok | Hello Go world\nsubmit 1\n")
+	a.svc.Shutdown()
+	out := a.run(t, "submit 1\ncancel 1\nreopen 1\nadd new | текст\nsubmit 2\nshow 2\n")
+
+	assertContains(t, out,
+		"ошибка: нельзя перевести задачу #1 из done в queued (submit: task 1: done -> queued: invalid status transition)",
+		"ошибка: нельзя перевести задачу #1 из done в cancelled",
+		"ошибка: нельзя перевести задачу #1 из done в todo",
+		"ошибка: обработка остановлена, новые задачи не принимаются (submit: task 2: worker pool is stopped)",
+		"статус:    todo",
+	)
+}
+
+type gateProcessor struct {
+	started chan task.ID
+	release chan struct{}
+	once    sync.Once
+}
+
+func (p *gateProcessor) Process(t task.Task) (task.Result, error) {
+	p.started <- t.ID
+	<-p.release
+	return task.Analyze(t.Description)
+}
+
+func (p *gateProcessor) open() { p.once.Do(func() { close(p.release) }) }
+
+func waitStarted(t *testing.T, ch <-chan task.ID) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for a worker")
+	}
+}
+
+func TestCLI_QueueFullAndBusyTasks(t *testing.T) {
+	proc := &gateProcessor{started: make(chan task.ID, 10), release: make(chan struct{})}
+	a := newApp(t, proc, 1)
+	t.Cleanup(proc.open)
+
+	a.run(t, "add a | текст\nadd b | текст\nadd c | текст\nadd d | текст\nsubmit 1\n")
+	waitStarted(t, proc.started)
+	a.run(t, "submit 2\n")
+	waitStarted(t, proc.started)
+	out := a.run(t, "submit 3 4\ndelete 1\nstats\n")
+
+	assertContains(t, out,
+		"задача #3 в очереди",
+		"ошибка: очередь заполнена, задача осталась в todo (submit: task 4: queue is full)",
+		"ошибка: задача в очереди или в обработке (delete: task 1: task is queued or being processed)",
+		"queued       1",
+		"in_progress  2",
+		"очередь:     1 из 1, воркеров: 2",
+	)
+	proc.open()
+}
+
 func TestCLI_OverdueAndHelp(t *testing.T) {
-	out := run(t, "add today @2026-10-10\noverdue\nhelp\n")
-	assertContains(t, out, "создана задача #1", "задач нет", "Команды:")
+	a := newApp(t, nil, 5)
+	out := a.run(t, "add today @2026-11-21\noverdue\nhelp\n")
+	assertContains(t, out, "создана задача #1", "задач нет", "Команды:", "submit <id>")
 }
 
 func TestCLI_ShowsOverdueMark(t *testing.T) {
-	today := time.Date(2026, 10, 10, 12, 0, 0, 0, time.UTC)
-	svc := service.New(storage.NewMemoryStore(), fixedClock{now: today})
+	svc, err := service.New(storage.NewMemoryStore(), fixedClock{now: today}, nil, service.Config{Workers: 2, QueueSize: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(svc.Shutdown)
 	var out bytes.Buffer
 	app := cli.New(svc, &out, fixedClock{now: today.AddDate(0, 0, 7)})
 
-	if err := app.Execute("add late @2026-10-11"); err != nil {
+	if err := app.Execute("add late @2026-11-22"); err != nil {
 		t.Fatal(err)
 	}
 	if err := app.Execute("list"); err != nil {
@@ -134,7 +219,8 @@ func TestCLI_ShowsOverdueMark(t *testing.T) {
 }
 
 func TestCLI_ExitStopsReading(t *testing.T) {
-	out := run(t, "add first\nexit\nadd second\n")
+	a := newApp(t, nil, 5)
+	out := a.run(t, "add first\nexit\nadd second\n")
 	if strings.Contains(out, "#2") {
 		t.Fatalf("commands after exit were executed:\n%s", out)
 	}
@@ -145,9 +231,8 @@ type errReader struct{}
 func (errReader) Read([]byte) (int, error) { return 0, errors.New("disk on fire") }
 
 func TestCLI_ReadErrorIsReturned(t *testing.T) {
-	svc := service.New(storage.NewMemoryStore(), nil)
-	err := cli.New(svc, &bytes.Buffer{}, nil).Run(errReader{})
-	if err == nil || err.Error() != "disk on fire" {
+	a := newApp(t, nil, 5)
+	if err := a.cli.Run(errReader{}); err == nil || err.Error() != "disk on fire" {
 		t.Fatalf("err = %v, want read error", err)
 	}
 }

@@ -22,6 +22,10 @@ type Task struct {
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
 
+	Result     Result
+	FailReason string
+	Worker     int
+
 	status Status
 }
 
@@ -85,6 +89,39 @@ func (t *Task) TransitionTo(to Status, now time.Time) error {
 	return nil
 }
 
+func (t *Task) Start(worker int, now time.Time) error {
+	if err := t.TransitionTo(StatusInProgress, now); err != nil {
+		return err
+	}
+	t.Worker = worker
+	return nil
+}
+
+func (t *Task) Complete(r Result, now time.Time) error {
+	if err := t.TransitionTo(StatusDone, now); err != nil {
+		return err
+	}
+	t.Result = r
+	t.FailReason = ""
+	return nil
+}
+
+func (t *Task) Fail(reason string, now time.Time) error {
+	if err := t.TransitionTo(StatusFailed, now); err != nil {
+		return err
+	}
+	t.Result = Result{}
+	t.FailReason = reason
+	return nil
+}
+
+func (t *Task) Reopen(now time.Time) error {
+	if t.status != StatusFailed && t.status != StatusCancelled {
+		return &TransitionError{ID: t.ID, From: t.status, To: StatusTodo}
+	}
+	return t.TransitionTo(StatusTodo, now)
+}
+
 func (t *Task) IsOverdue(now time.Time) bool {
 	return !t.Deadline.IsZero() && now.After(t.Deadline) && !t.status.IsClosed()
 }
@@ -96,6 +133,7 @@ func (t *Task) HasTag(tag string) bool {
 func (t *Task) Clone() Task {
 	c := *t
 	c.Tags = slices.Clone(t.Tags)
+	c.Result.Keywords = slices.Clone(t.Result.Keywords)
 	return c
 }
 

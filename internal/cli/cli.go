@@ -11,18 +11,20 @@ import (
 
 	"taskflow/internal/service"
 	"taskflow/internal/task"
+	"taskflow/internal/worker"
 )
 
 const helpText = `Команды:
-  add <название> [!low|!medium|!high] [#тег ...] [@ГГГГ-ММ-ДД]   создать задачу
-  list [статус] [!приоритет] [#тег]                              список (статусы: todo, in_progress, done, cancelled)
-  show <id>                                                      подробности о задаче
-  start <id> | done <id> | cancel <id> | reopen <id>             сменить статус
-  delete <id>                                                    удалить задачу
-  overdue                                                        просроченные задачи
-  stats                                                          сколько задач в каждом статусе
-  help                                                           эта справка
-  exit                                                           выход`
+  add <название> [!low|!medium|!high] [#тег ...] [@ГГГГ-ММ-ДД] [| описание]   создать задачу
+  submit <id> [id ...]                                                     отправить задачи на анализ воркерам
+  list [статус] [!приоритет] [#тег]                                        список (статусы: todo, queued, in_progress, done, failed, cancelled)
+  show <id>                                                                подробности и результат анализа
+  cancel <id> | reopen <id>                                                отменить задачу / вернуть в todo
+  delete <id>                                                              удалить задачу
+  overdue                                                                  просроченные задачи
+  stats                                                                    статусы задач и состояние очереди
+  help                                                                     эта справка
+  exit                                                                     выход (воркеры доделают задачи из очереди)`
 
 type CLI struct {
 	svc   *service.Service
@@ -60,23 +62,28 @@ func (c *CLI) prompt() {
 }
 
 func (c *CLI) Execute(line string) error {
+	line = strings.TrimSpace(line)
 	fields := strings.Fields(line)
 	if len(fields) == 0 {
 		return nil
 	}
-	cmd, args := strings.ToLower(fields[0]), fields[1:]
+	cmd := strings.ToLower(fields[0])
+	rest := strings.TrimSpace(line[len(fields[0]):])
+	args := fields[1:]
 
 	switch cmd {
 	case "help":
 		fmt.Fprintln(c.out, helpText)
 		return nil
 	case "add":
-		return c.add(args)
+		return c.add(rest)
+	case "submit":
+		return c.submit(args)
 	case "list":
 		return c.list(args)
 	case "show":
 		return c.show(args)
-	case "start", "done", "cancel", "reopen":
+	case "cancel", "reopen":
 		return c.changeStatus(cmd, args)
 	case "delete":
 		return c.delete(args)
@@ -89,12 +96,12 @@ func (c *CLI) Execute(line string) error {
 	}
 }
 
-func (c *CLI) add(args []string) error {
-	var (
-		p          task.Params
-		titleWords []string
-	)
-	for _, arg := range args {
+func (c *CLI) add(rest string) error {
+	head, description, _ := strings.Cut(rest, "|")
+	p := task.Params{Description: description}
+
+	var titleWords []string
+	for _, arg := range strings.Fields(head) {
 		switch {
 		case strings.HasPrefix(arg, "!"):
 			priority, err := task.ParsePriority(arg[1:])
@@ -121,6 +128,25 @@ func (c *CLI) add(args []string) error {
 		return err
 	}
 	fmt.Fprintf(c.out, "создана задача #%d\n", t.ID)
+	return nil
+}
+
+func (c *CLI) submit(args []string) error {
+	if len(args) == 0 {
+		return errors.New("нужно указать хотя бы один id, например: submit 1 2 3")
+	}
+	for _, arg := range args {
+		id, err := parseID([]string{arg})
+		if err != nil {
+			fmt.Fprintf(c.out, "ошибка: %s\n", describeError(err))
+			continue
+		}
+		if _, err := c.svc.Submit(id); err != nil {
+			fmt.Fprintf(c.out, "ошибка: %s\n", describeError(err))
+			continue
+		}
+		fmt.Fprintf(c.out, "задача #%d в очереди\n", id)
+	}
 	return nil
 }
 
@@ -171,6 +197,21 @@ func (c *CLI) show(args []string) error {
 	if !t.Deadline.IsZero() {
 		fmt.Fprintf(c.out, "  дедлайн:   %s\n", t.Deadline.Format("02.01.2006"))
 	}
+	if t.Description != "" {
+		fmt.Fprintf(c.out, "  описание:  %s\n", t.Description)
+	}
+	switch t.Status() {
+	case task.StatusDone:
+		r := t.Result
+		fmt.Fprintf(c.out, "  анализ:    %d слов, %d символов, %d уникальных слов\n", r.Words, r.Characters, r.UniqueWords)
+		if len(r.Keywords) > 0 {
+			fmt.Fprintf(c.out, "  ключевые:  %s\n", strings.Join(r.Keywords, ", "))
+		}
+		fmt.Fprintf(c.out, "  воркер:    %d\n", t.Worker)
+	case task.StatusFailed:
+		fmt.Fprintf(c.out, "  ошибка:    %s\n", t.FailReason)
+		fmt.Fprintf(c.out, "  воркер:    %d\n", t.Worker)
+	}
 	fmt.Fprintf(c.out, "  создана:   %s\n", t.CreatedAt.Format("02.01.2006 15:04"))
 	fmt.Fprintf(c.out, "  изменена:  %s\n", t.UpdatedAt.Format("02.01.2006 15:04"))
 	return nil
@@ -184,10 +225,6 @@ func (c *CLI) changeStatus(cmd string, args []string) error {
 
 	var t task.Task
 	switch cmd {
-	case "start":
-		t, err = c.svc.Start(id)
-	case "done":
-		t, err = c.svc.Complete(id)
 	case "cancel":
 		t, err = c.svc.Cancel(id)
 	case "reopen":
@@ -232,6 +269,9 @@ func (c *CLI) stats() error {
 		total += counts[st]
 	}
 	fmt.Fprintf(c.out, "  %-12s %d\n", "всего", total)
+
+	q := c.svc.Queue()
+	fmt.Fprintf(c.out, "  очередь:     %d из %d, воркеров: %d\n", q.Queued, q.Capacity, q.Workers)
 	return nil
 }
 
@@ -248,6 +288,12 @@ func (c *CLI) printTasks(tasks []task.Task) {
 		}
 		if !t.Deadline.IsZero() {
 			line += "  до " + t.Deadline.Format("02.01.2006")
+		}
+		switch t.Status() {
+		case task.StatusDone:
+			line += fmt.Sprintf("  [%d слов, воркер %d]", t.Result.Words, t.Worker)
+		case task.StatusFailed:
+			line += fmt.Sprintf("  [ошибка анализа, воркер %d]", t.Worker)
 		}
 		if t.IsOverdue(now) {
 			line += "  [просрочена]"
@@ -266,7 +312,7 @@ func (c *CLI) parseDate(s string) (time.Time, error) {
 
 func parseID(args []string) (task.ID, error) {
 	if len(args) != 1 {
-		return 0, errors.New("нужно указать один id задачи, например: start 1")
+		return 0, errors.New("нужно указать один id задачи, например: show 1")
 	}
 	n, err := strconv.Atoi(args[0])
 	if err != nil || n <= 0 {
@@ -287,6 +333,12 @@ func describeError(err error) string {
 		return fmt.Sprintf("некорректное поле %s (%v)", validationErr.Field, err)
 	case errors.Is(err, task.ErrNotFound):
 		return fmt.Sprintf("задача не найдена (%v)", err)
+	case errors.Is(err, task.ErrTaskBusy):
+		return fmt.Sprintf("задача в очереди или в обработке (%v)", err)
+	case errors.Is(err, worker.ErrQueueFull):
+		return fmt.Sprintf("очередь заполнена, задача осталась в todo (%v)", err)
+	case errors.Is(err, worker.ErrStopped):
+		return fmt.Sprintf("обработка остановлена, новые задачи не принимаются (%v)", err)
 	default:
 		return err.Error()
 	}

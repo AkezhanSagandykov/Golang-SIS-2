@@ -11,12 +11,14 @@ import (
 func TestStatus_CanTransitionTo(t *testing.T) {
 	type pair struct{ from, to task.Status }
 	allowed := map[pair]bool{
-		{task.StatusTodo, task.StatusInProgress}:      true,
-		{task.StatusTodo, task.StatusCancelled}:       true,
-		{task.StatusInProgress, task.StatusTodo}:      true,
-		{task.StatusInProgress, task.StatusDone}:      true,
-		{task.StatusInProgress, task.StatusCancelled}: true,
-		{task.StatusCancelled, task.StatusTodo}:       true,
+		{task.StatusTodo, task.StatusQueued}:       true,
+		{task.StatusTodo, task.StatusCancelled}:    true,
+		{task.StatusQueued, task.StatusInProgress}: true,
+		{task.StatusQueued, task.StatusTodo}:       true,
+		{task.StatusInProgress, task.StatusDone}:   true,
+		{task.StatusInProgress, task.StatusFailed}: true,
+		{task.StatusFailed, task.StatusTodo}:       true,
+		{task.StatusCancelled, task.StatusTodo}:    true,
 	}
 
 	for _, from := range task.AllStatuses() {
@@ -43,16 +45,25 @@ func TestStatus_UnknownValues(t *testing.T) {
 	}
 }
 
-func TestStatus_IsClosed(t *testing.T) {
-	tests := map[task.Status]bool{
-		task.StatusTodo:       false,
-		task.StatusInProgress: false,
-		task.StatusDone:       true,
-		task.StatusCancelled:  true,
+func TestStatus_IsClosedAndIsBusy(t *testing.T) {
+	tests := []struct {
+		status     task.Status
+		wantClosed bool
+		wantBusy   bool
+	}{
+		{task.StatusTodo, false, false},
+		{task.StatusQueued, false, true},
+		{task.StatusInProgress, false, true},
+		{task.StatusDone, true, false},
+		{task.StatusFailed, false, false},
+		{task.StatusCancelled, true, false},
 	}
-	for status, want := range tests {
-		if got := status.IsClosed(); got != want {
-			t.Errorf("%s.IsClosed() = %v, want %v", status, got, want)
+	for _, tt := range tests {
+		if got := tt.status.IsClosed(); got != tt.wantClosed {
+			t.Errorf("%s.IsClosed() = %v, want %v", tt.status, got, tt.wantClosed)
+		}
+		if got := tt.status.IsBusy(); got != tt.wantBusy {
+			t.Errorf("%s.IsBusy() = %v, want %v", tt.status, got, tt.wantBusy)
 		}
 	}
 }
@@ -64,8 +75,10 @@ func TestParseStatus(t *testing.T) {
 		wantErr bool
 	}{
 		{in: "todo", want: task.StatusTodo},
+		{in: "QUEUED", want: task.StatusQueued},
 		{in: "In_Progress", want: task.StatusInProgress},
 		{in: "  done ", want: task.StatusDone},
+		{in: "failed", want: task.StatusFailed},
 		{in: "cancelled", want: task.StatusCancelled},
 		{in: "blocked", wantErr: true},
 		{in: "", wantErr: true},
@@ -84,9 +97,6 @@ func TestParseStatus(t *testing.T) {
 			}
 			if got != tt.want {
 				t.Errorf("got %s, want %s", got, tt.want)
-			}
-			if got.String() != tt.want.String() {
-				t.Errorf("String round-trip broken: %q", got.String())
 			}
 		})
 	}
