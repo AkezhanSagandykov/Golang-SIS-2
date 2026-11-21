@@ -128,6 +128,7 @@
 | Тесты с детектором гонок | `go test -race ./...` |
 | Тесты пула подробно | `go test -race -v ./internal/worker` |
 | Проверки | `gofmt -l .` и `go vet ./...` |
+| Все проверки одной командой (их же запускает CI) | `./scripts/check.sh` |
 
 **GoLand:** открой `cmd/taskflow/main.go` и нажми зелёный ▶ рядом с `func main()`. Флаги задаются в Run → Edit Configurations → Program arguments.
 

@@ -22,7 +22,8 @@ internal/service/        use cases: Create/Submit/process/Cancel/Reopen/List/Sta
 internal/cli/            command parsing and output (user-facing text is Russian)
 ```
 
-Dependency direction: `cli → service → task`, `service → worker`, `storage → task`.
+Dependency direction: `cli → service → task`, `cli → worker` (only to recognise
+`ErrQueueFull` / `ErrStopped` in messages), `service → worker`, `storage → task`.
 `service` knows storage only through the `Repository` interface; `main` wires them.
 `storage` and `worker` must never import `service` or `cli`.
 
@@ -38,6 +39,7 @@ Invariants that must not be broken (see `docs/assignment05/acceptance-criteria.m
 
 - Go 1.22 or newer (`go.mod`: `go 1.22`). No third-party modules: `go.sum` does not exist.
 - Run every command from the repository root (the folder with `go.mod`).
+- Use the installed Go (`GOTOOLCHAIN=local`): no command may download a toolchain.
 - Run the app: `go run ./cmd/taskflow -demo` (flags: `-workers N` (N ≥ 2), `-queue N`).
 
 ## 4. Commands
@@ -52,6 +54,7 @@ Invariants that must not be broken (see `docs/assignment05/acceptance-criteria.m
 | Tests | `go test -count=1 ./...` |
 | Race detector (required for concurrency code) | `go test -count=1 -race ./...` |
 | Coverage | `go test -count=1 -cover ./...` |
+| **All of the above in one gate** (exits non-zero on any failure; CI runs it too) | `./scripts/check.sh` |
 | Inspect history | `git status`, `git diff`, `git log` |
 
 **Ask the human first:** `go run ./cmd/taskflow` (interactive), `gofmt -w`, `go get`,
@@ -87,8 +90,8 @@ An agent must never:
 ## 7. Test expectations
 
 - Every behaviour change or bug fix comes with a test that fails before the change.
-- Before proposing a diff, run: `gofmt -l .`, `go vet ./...`, `go build ./...`,
-  `go test -count=1 -race ./...`. All must pass; report the exact commands and results.
+- Before proposing a diff, run `./scripts/check.sh` (gofmt, vet, build, race tests, coverage).
+  It must end with `OK`; report its output. CI (`.github/workflows/checks.yml`) repeats it on every push.
 - Coverage of `internal/...` packages must not go down.
 
 ## 8. Review gates

@@ -1,0 +1,33 @@
+# Gate demonstration on a throwaway copy of the repository (not committed).
+
+## Case 1: an unformatted Go file
+$ ./scripts/check.sh
+== go version go1.24.7 linux/amd64  commit 967ef30
+== gofmt -l .
+FAIL: files are not gofmt-formatted:
+internal/task/zz_unformatted.go
+[exit code: 1]
+
+## Case 2: a test with a data race (two goroutines write one variable)
+$ ./scripts/check.sh
+== go version go1.24.7 linux/amd64  commit 967ef30
+== gofmt -l .
+== go vet ./...
+== go build ./...
+== go test -count=1 -race ./...
+ok  	taskflow/internal/cli	1.016s
+ok  	taskflow/internal/service	1.196s
+ok  	taskflow/internal/storage	1.219s
+WARNING: DATA RACE
+    testing.go:1490: race detected during execution of test
+FAIL
+FAIL	taskflow/internal/task	0.014s
+[exit code: 1]
+
+## Case 3: clean copy again
+$ ./scripts/check.sh
+== OK: all checks passed
+[exit code: 0]
+
+# The GitHub Actions run itself was NOT executed from the AI workspace (no push access).
+# It runs after the student pushes the branch; its result is recorded separately.

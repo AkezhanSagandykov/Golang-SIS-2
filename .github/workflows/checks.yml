@@ -1,0 +1,28 @@
+# Automated quality gate (risk R9): every push and pull request runs the same checks
+# that AGENTS.md section 7 asks agents and humans to run, plus a vulnerability scan.
+name: checks
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GOTOOLCHAIN: local
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: "1.27.x" # a supported Go release; patch updates arrive automatically
+      - name: Quality gate (gofmt, vet, build, race tests, coverage)
+        run: ./scripts/check.sh
+      - name: Vulnerability scan
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
