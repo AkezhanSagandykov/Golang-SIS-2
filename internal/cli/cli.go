@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bufio"
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -75,11 +76,21 @@ func New(svc *service.Service, out io.Writer, clock service.Clock) *CLI {
 }
 
 func (c *CLI) Run(in io.Reader) error {
-	scanner := bufio.NewScanner(in)
+	reader := bufio.NewReader(in)
 	c.prompt()
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line != "" {
+	for {
+		line, tooLong, err := readLine(reader, MaxLineBytes)
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		line = strings.TrimSpace(line)
+		switch {
+		case tooLong:
+			fmt.Fprintf(c.out, "ошибка: строка слишком длинная (больше %d байт), команда пропущена\n", MaxLineBytes)
+		case line != "":
 			if err := c.Execute(line); err != nil {
 				if errors.Is(err, ErrExit) {
 					return nil
@@ -89,7 +100,34 @@ func (c *CLI) Run(in io.Reader) error {
 		}
 		c.prompt()
 	}
-	return scanner.Err()
+}
+
+// MaxLineBytes is the longest input line Run accepts. A longer line is skipped with an
+// error message instead of ending the session (risk R1: that used to lose every task).
+const MaxLineBytes = 64 * 1024
+
+// readLine reads one line without its line ending. A line longer than max bytes is read
+// to its end and discarded, and tooLong is true. It returns io.EOF only when no input is left.
+func readLine(r *bufio.Reader, max int) (line string, tooLong bool, err error) {
+	var buf []byte
+	for {
+		chunk, err := r.ReadSlice('\n')
+		if !tooLong {
+			buf = append(buf, chunk...)
+			if len(bytes.TrimRight(buf, "\r\n")) > max {
+				tooLong, buf = true, nil
+			}
+		}
+		switch {
+		case err == bufio.ErrBufferFull:
+			continue
+		case err == io.EOF && (len(buf) > 0 || tooLong):
+			return strings.TrimRight(string(buf), "\r\n"), tooLong, nil
+		case err != nil:
+			return "", false, err
+		}
+		return strings.TrimRight(string(buf), "\r\n"), tooLong, nil
+	}
 }
 
 func (c *CLI) prompt() {

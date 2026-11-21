@@ -236,3 +236,24 @@ func TestCLI_ReadErrorIsReturned(t *testing.T) {
 		t.Fatalf("err = %v, want read error", err)
 	}
 }
+
+// Regression test for risk R1: an over-long line must be rejected without ending the session.
+func TestCLI_LongLineIsRejectedAndSessionContinues(t *testing.T) {
+	a := newApp(t, nil, 5)
+	long := "add x | " + strings.Repeat("а", 70*1024)
+	out := a.run(t, "add first\n"+long+"\nadd second\n")
+	assertContains(t, out,
+		"создана задача #1",
+		"ошибка: строка слишком длинная",
+		"создана задача #2",
+	)
+	if strings.Contains(out, "создана задача #3") {
+		t.Errorf("the over-long line was executed:\n%s", out)
+	}
+}
+
+// The last line may have no trailing newline and must still be executed.
+func TestCLI_LastLineWithoutNewline(t *testing.T) {
+	a := newApp(t, nil, 5)
+	assertContains(t, a.run(t, "add first\r\nadd second"), "создана задача #1", "создана задача #2")
+}

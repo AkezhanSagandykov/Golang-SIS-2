@@ -1,0 +1,26 @@
+$ go test -count=1 -run "TestCLI_LongLine|TestCLI_LastLine" ./internal/cli   (test added, fix NOT yet applied)
+--- FAIL: TestCLI_LongLineIsRejectedAndSessionContinues (0.00s)
+    cli_test.go:244: Run: bufio.Scanner: token too long
+FAIL
+FAIL	taskflow/internal/cli	0.002s
+FAIL
+[exit code: 1]
+
+$ go test -count=1 -race -run "TestCLI_LongLine|TestCLI_LastLine|TestCLI_ReadError|TestCLI_Exit" -v ./internal/cli   (after the fix)
+--- PASS: TestCLI_ExitStopsReading (0.00s)
+--- PASS: TestCLI_ReadErrorIsReturned (0.00s)
+--- PASS: TestCLI_LongLineIsRejectedAndSessionContinues (0.00s)
+--- PASS: TestCLI_LastLineWithoutNewline (0.00s)
+ok  	taskflow/internal/cli	1.018s
+
+# Self-review of the first diff found an off-by-two in the limit (len(buf)+len(chunk) > max+2);
+# it was replaced by an exact check on the line without its ending, plus TestReadLine_LimitIsExact.
+
+$ go test -count=1 -race -run "ReadLine|LongLine|LastLine|ReadError|Exit" -v ./internal/cli
+--- PASS: TestExecute_ExitAndQuitReturnErrExit (0.00s)
+--- PASS: TestReadLine_LimitIsExact (0.00s)
+--- PASS: TestCLI_ExitStopsReading (0.00s)
+--- PASS: TestCLI_ReadErrorIsReturned (0.00s)
+--- PASS: TestCLI_LongLineIsRejectedAndSessionContinues (0.00s)
+--- PASS: TestCLI_LastLineWithoutNewline (0.00s)
+ok  	taskflow/internal/cli	1.016s
