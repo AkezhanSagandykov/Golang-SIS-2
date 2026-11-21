@@ -14,29 +14,64 @@ import (
 	"taskflow/internal/worker"
 )
 
-const helpText = `Команды:
-  add <название> [!low|!medium|!high] [#тег ...] [@ГГГГ-ММ-ДД] [| описание]   создать задачу
-  submit <id> [id ...]                                                     отправить задачи на анализ воркерам
-  list [статус] [!приоритет] [#тег]                                        список (статусы: todo, queued, in_progress, done, failed, cancelled)
-  show <id>                                                                подробности и результат анализа
-  cancel <id> | reopen <id>                                                отменить задачу / вернуть в todo
-  delete <id>                                                              удалить задачу
-  overdue                                                                  просроченные задачи
-  stats                                                                    статусы задач и состояние очереди
-  help                                                                     эта справка
-  exit                                                                     выход (воркеры доделают задачи из очереди)`
+// ErrExit is returned by Execute for the "exit" and "quit" commands; Run stops reading input.
+var ErrExit = errors.New("exit")
+
+// command is the single place that defines a CLI command: its names, help line and handler.
+// The help text and the dispatcher are both built from the same table, so they cannot drift.
+type command struct {
+	names   []string // the first name is shown in help, the rest are aliases
+	usage   string
+	summary string
+	run     func(c *CLI, args []string, rest string) error
+}
+
+func commandTable() []command {
+	return []command{
+		{names: []string{"add"}, usage: "add <название> [!low|!medium|!high] [#тег ...] [@ГГГГ-ММ-ДД] [| описание]", summary: "создать задачу",
+			run: func(c *CLI, _ []string, rest string) error { return c.add(rest) }},
+		{names: []string{"submit"}, usage: "submit <id> [id ...]", summary: "отправить задачи на анализ воркерам",
+			run: func(c *CLI, args []string, _ string) error { return c.submit(args) }},
+		{names: []string{"list"}, usage: "list [статус] [!приоритет] [#тег]", summary: "список (статусы: todo, queued, in_progress, done, failed, cancelled)",
+			run: func(c *CLI, args []string, _ string) error { return c.list(args) }},
+		{names: []string{"show"}, usage: "show <id>", summary: "подробности и результат анализа",
+			run: func(c *CLI, args []string, _ string) error { return c.show(args) }},
+		{names: []string{"cancel"}, usage: "cancel <id>", summary: "отменить задачу",
+			run: func(c *CLI, args []string, _ string) error { return c.setStatus(args, c.svc.Cancel) }},
+		{names: []string{"reopen"}, usage: "reopen <id>", summary: "вернуть задачу в todo (из failed или cancelled)",
+			run: func(c *CLI, args []string, _ string) error { return c.setStatus(args, c.svc.Reopen) }},
+		{names: []string{"delete"}, usage: "delete <id>", summary: "удалить задачу",
+			run: func(c *CLI, args []string, _ string) error { return c.delete(args) }},
+		{names: []string{"overdue"}, usage: "overdue", summary: "просроченные задачи",
+			run: func(c *CLI, _ []string, _ string) error { return c.overdue() }},
+		{names: []string{"stats"}, usage: "stats", summary: "статусы задач и состояние очереди",
+			run: func(c *CLI, _ []string, _ string) error { return c.stats() }},
+		{names: []string{"help"}, usage: "help", summary: "эта справка",
+			run: func(c *CLI, _ []string, _ string) error { c.help(); return nil }},
+		{names: []string{"exit", "quit"}, usage: "exit | quit", summary: "выход (воркеры доделают задачи из очереди)",
+			run: func(*CLI, []string, string) error { return ErrExit }},
+	}
+}
 
 type CLI struct {
-	svc   *service.Service
-	out   io.Writer
-	clock service.Clock
+	svc      *service.Service
+	out      io.Writer
+	clock    service.Clock
+	commands []command
+	byName   map[string]command
 }
 
 func New(svc *service.Service, out io.Writer, clock service.Clock) *CLI {
 	if clock == nil {
 		clock = service.SystemClock{}
 	}
-	return &CLI{svc: svc, out: out, clock: clock}
+	c := &CLI{svc: svc, out: out, clock: clock, commands: commandTable(), byName: map[string]command{}}
+	for _, cmd := range c.commands {
+		for _, name := range cmd.names {
+			c.byName[name] = cmd
+		}
+	}
+	return c
 }
 
 func (c *CLI) Run(in io.Reader) error {
@@ -44,11 +79,11 @@ func (c *CLI) Run(in io.Reader) error {
 	c.prompt()
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
-		if line == "exit" || line == "quit" {
-			return nil
-		}
 		if line != "" {
 			if err := c.Execute(line); err != nil {
+				if errors.Is(err, ErrExit) {
+					return nil
+				}
 				fmt.Fprintf(c.out, "ошибка: %s\n", describeError(err))
 			}
 		}
@@ -67,32 +102,19 @@ func (c *CLI) Execute(line string) error {
 	if len(fields) == 0 {
 		return nil
 	}
-	cmd := strings.ToLower(fields[0])
+	name := strings.ToLower(fields[0])
+	cmd, ok := c.byName[name]
+	if !ok {
+		return fmt.Errorf("неизвестная команда %q, введите help", name)
+	}
 	rest := strings.TrimSpace(line[len(fields[0]):])
-	args := fields[1:]
+	return cmd.run(c, fields[1:], rest)
+}
 
-	switch cmd {
-	case "help":
-		fmt.Fprintln(c.out, helpText)
-		return nil
-	case "add":
-		return c.add(rest)
-	case "submit":
-		return c.submit(args)
-	case "list":
-		return c.list(args)
-	case "show":
-		return c.show(args)
-	case "cancel", "reopen":
-		return c.changeStatus(cmd, args)
-	case "delete":
-		return c.delete(args)
-	case "overdue":
-		return c.overdue()
-	case "stats":
-		return c.stats()
-	default:
-		return fmt.Errorf("неизвестная команда %q, введите help", cmd)
+func (c *CLI) help() {
+	fmt.Fprintln(c.out, "Команды:")
+	for _, cmd := range c.commands {
+		fmt.Fprintf(c.out, "  %-74s %s\n", cmd.usage, cmd.summary)
 	}
 }
 
@@ -217,19 +239,12 @@ func (c *CLI) show(args []string) error {
 	return nil
 }
 
-func (c *CLI) changeStatus(cmd string, args []string) error {
+func (c *CLI) setStatus(args []string, change func(task.ID) (task.Task, error)) error {
 	id, err := parseID(args)
 	if err != nil {
 		return err
 	}
-
-	var t task.Task
-	switch cmd {
-	case "cancel":
-		t, err = c.svc.Cancel(id)
-	case "reopen":
-		t, err = c.svc.Reopen(id)
-	}
+	t, err := change(id)
 	if err != nil {
 		return err
 	}

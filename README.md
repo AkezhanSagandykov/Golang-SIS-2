@@ -140,7 +140,7 @@ list [статус] [!приоритет] [#тег]
 show <id>                     подробности и результат анализа
 cancel <id> | reopen <id>
 delete <id>
-overdue | stats | help | exit
+overdue | stats | help | exit (или quit)
 ```
 
 ### Пример сессии

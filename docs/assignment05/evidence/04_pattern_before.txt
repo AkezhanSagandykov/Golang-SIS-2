@@ -1,0 +1,30 @@
+$ go test -count=1 -v -run TestProbe_HelpAndDispatchDrift ./internal/cli
+    probe_drift_test.go:12: Execute("exit") -> неизвестная команда "exit", введите help
+    probe_drift_test.go:14: help mentions "quit": false (but Run accepts "quit")
+--- PASS: TestProbe_HelpAndDispatchDrift (0.00s)
+PASS
+ok  	taskflow/internal/cli	0.003s
+
+$ grep -n "case \"\|\"exit\"\|\"quit\"\|^  [a-z]" internal/cli/cli.go
+18:  add <название> [!low|!medium|!high] [#тег ...] [@ГГГГ-ММ-ДД] [| описание]   создать задачу
+19:  submit <id> [id ...]                                                     отправить задачи на анализ воркерам
+20:  list [статус] [!приоритет] [#тег]                                        список (статусы: todo, queued, in_progress, done, failed, cancelled)
+21:  show <id>                                                                подробности и результат анализа
+22:  cancel <id> | reopen <id>                                                отменить задачу / вернуть в todo
+23:  delete <id>                                                              удалить задачу
+24:  overdue                                                                  просроченные задачи
+25:  stats                                                                    статусы задач и состояние очереди
+26:  help                                                                     эта справка
+27:  exit                                                                     выход (воркеры доделают задачи из очереди)`
+47:		if line == "exit" || line == "quit" {
+75:	case "help":
+78:	case "add":
+80:	case "submit":
+82:	case "list":
+84:	case "show":
+86:	case "cancel", "reopen":
+88:	case "delete":
+90:	case "overdue":
+92:	case "stats":
+228:	case "cancel":
+230:	case "reopen":
