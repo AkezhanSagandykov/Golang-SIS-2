@@ -1,0 +1,56 @@
+$ go test -count=1 -v -run TestProbe_LongLineEndsSession ./internal/cli
+    probe_test.go:13: Run returned error: bufio.Scanner: token too long
+    probe_test.go:14: output contains task #2 (command after the long line executed): false
+--- PASS: TestProbe_LongLineEndsSession (0.00s)
+PASS
+ok  	taskflow/internal/cli	0.002s
+
+$ go test -count=1 -v -run TestProbe_HugeDescriptionAccepted ./internal/service
+    probe_test.go:20: title of 201 runes -> err: create: validation failed: title must be at most 200 characters
+    probe_test.go:22: description of 9999999 bytes -> err: <nil>
+--- PASS: TestProbe_HugeDescriptionAccepted (0.03s)
+PASS
+ok  	taskflow/internal/service	0.035s
+
+$ go build -o /tmp/panicprobe ./cmd/panicprobe && /tmp/panicprobe   (first 12 lines)
+submit err: <nil>
+panic: unexpected input in processor
+
+goroutine 18 [running]:
+main.panicky.Process(...)
+	/home/claude/a05_probe/cmd/panicprobe/main.go:15
+taskflow/internal/service.(*Service).process(0xc0000a60c0, 0x1, 0x1)
+	/home/claude/a05_probe/internal/service/service.go:129 +0x275
+taskflow/internal/worker.(*Pool).run(0xc0000a6100, 0x1)
+	/home/claude/a05_probe/internal/worker/pool.go:57 +0x79
+created by taskflow/internal/worker.NewPool in goroutine 1
+	/home/claude/a05_probe/internal/worker/pool.go:49 +0x249
+[exit code: 2]  (process terminated; the line 'this line is printed only if the process survived' never printed)
+
+$ ls -a (root)
+.
+..
+.git
+.gitignore
+README.md
+cmd
+go.mod
+internal
+
+$ ls .github Makefile AGENTS.md CLAUDE.md .golangci.yml 2>&1
+ls: cannot access '.github': No such file or directory
+ls: cannot access 'Makefile': No such file or directory
+ls: cannot access 'AGENTS.md': No such file or directory
+ls: cannot access 'CLAUDE.md': No such file or directory
+ls: cannot access '.golangci.yml': No such file or directory
+
+$ cat go.mod
+module taskflow
+
+go 1.22
+
+$ grep -n "signal\|Notify" cmd/taskflow/main.go
+(no matches)
+
+$ grep -n "recover" -r internal/
+(no matches)

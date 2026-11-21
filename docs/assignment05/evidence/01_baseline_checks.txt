@@ -1,0 +1,54 @@
+# commit: cfa20b2  (Checkpoint 2: worker pool, bounded queue, concurrent task processing)
+# date: 2026-11-21 17:53 +05   host: Linux x86_64
+
+$ go version
+go version go1.24.7 linux/amd64
+[exit code: 0]
+
+$ go env GOOS GOARCH GOFLAGS
+linux
+amd64
+
+[exit code: 0]
+
+$ gofmt -l .
+[exit code: 0]
+
+$ go vet ./...
+[exit code: 0]
+
+$ go build ./...
+[exit code: 0]
+
+$ go test -count=1 ./...
+?   	taskflow/cmd/taskflow	[no test files]
+ok  	taskflow/internal/cli	0.002s
+ok  	taskflow/internal/service	0.019s
+ok  	taskflow/internal/storage	0.068s
+ok  	taskflow/internal/task	0.002s
+ok  	taskflow/internal/worker	0.002s
+[exit code: 0]
+
+$ go test -count=1 -race ./...
+?   	taskflow/cmd/taskflow	[no test files]
+ok  	taskflow/internal/cli	1.015s
+ok  	taskflow/internal/service	1.266s
+ok  	taskflow/internal/storage	1.773s
+ok  	taskflow/internal/task	1.012s
+ok  	taskflow/internal/worker	1.012s
+[exit code: 0]
+
+$ go test -count=1 -cover ./...
+	taskflow/cmd/taskflow		coverage: 0.0% of statements
+ok  	taskflow/internal/cli	0.003s	coverage: 93.9% of statements
+ok  	taskflow/internal/service	0.025s	coverage: 95.9% of statements
+ok  	taskflow/internal/storage	0.079s	coverage: 100.0% of statements
+ok  	taskflow/internal/task	0.008s	coverage: 98.2% of statements
+ok  	taskflow/internal/worker	0.003s	coverage: 100.0% of statements
+[exit code: 0]
+
+$ go test -count=1 -json ./... | (count of passed / failed tests)
+tests (incl. subtests): passed=145 failed=0 skipped=0
+
+$ staticcheck ./...   and   govulncheck ./...
+NOT EXECUTED: staticcheck/govulncheck are not installed and could not be downloaded in this environment (proxy.golang.org blocked: 'Forbidden (agent proxy: no rule or network setting allows this host)').

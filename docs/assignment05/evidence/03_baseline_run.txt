@@ -1,0 +1,50 @@
+$ printf "submit 1 2 3 4 5\nstats\nlist\nshow 1\nsubmit 1\nexit\n" | go run ./cmd/taskflow -demo
+TaskFlow — трекер задач. Воркеров: 3, очередь: 10. Введите help, чтобы увидеть команды.
+> задача #1 в очереди
+задача #2 в очереди
+задача #3 в очереди
+задача #4 в очереди
+ошибка: нельзя перевести задачу #5 из cancelled в queued (submit: task 5: cancelled -> queued: invalid status transition)
+>   todo         0
+  queued       4
+  in_progress  0
+  done         0
+  failed       0
+  cancelled    1
+  всего        5
+  очередь:     1 из 10, воркеров: 3
+> #1   queued       high    Подготовиться к защите Checkpoint 2  #go #study  до 24.11.2026
+#2   queued       high    Написать тесты для пула  #go
+#3   queued       low     Прочитать про горутины  #go #reading
+#4   queued       medium  Позвонить в деканат
+#5   cancelled    low     Купить продукты
+> Задача #1: Подготовиться к защите Checkpoint 2
+  статус:    done
+  приоритет: high
+  теги:      #go #study
+  дедлайн:   24.11.2026
+  описание:  Повторить, как работает пул воркеров: очередь, воркеры, мьютекс и WaitGroup. Повторить, что происходит, когда очередь заполнена, и как воркеры останавливаются.
+  анализ:    20 слов, 159 символов, 15 уникальных слов
+  ключевые:  воркеры, очередь, повторить
+  воркер:    1
+  создана:   21.11.2026 17:54
+  изменена:  21.11.2026 17:54
+> ошибка: нельзя перевести задачу #1 из done в queued (submit: task 1: done -> queued: invalid status transition)
+> Останавливаю воркеры и жду задачи из очереди...
+Все воркеры завершились.
+[exit code: 0]
+
+$ go run ./cmd/taskflow -workers 1 </dev/null
+ошибка: new service: invalid worker pool config: need at least 2 workers, got 1
+exit status 1
+[exit code: 1]
+
+$ printf "submit 1 2 3 4\n" | go run ./cmd/taskflow -demo -workers 2 -queue 1
+TaskFlow — трекер задач. Воркеров: 2, очередь: 1. Введите help, чтобы увидеть команды.
+> задача #1 в очереди
+ошибка: очередь заполнена, задача осталась в todo (submit: task 2: queue is full)
+ошибка: очередь заполнена, задача осталась в todo (submit: task 3: queue is full)
+ошибка: очередь заполнена, задача осталась в todo (submit: task 4: queue is full)
+> Останавливаю воркеры и жду задачи из очереди...
+Все воркеры завершились.
+[exit code: 0]
