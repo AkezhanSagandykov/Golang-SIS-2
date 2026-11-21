@@ -1,0 +1,22 @@
+$ go test -count=1 -v -run "TestProbe_R" ./internal/cli   (at a05-reviewed, probe file not committed)
+    probe_review_test.go:17: R1: Run err = bufio.Scanner: token too long; second task created = false
+--- PASS: TestProbe_R1_LongLine (0.00s)
+    probe_review_test.go:24: R2: Run err = <nil>; command after 'quit smoking by friday' executed = false
+--- PASS: TestProbe_R2_QuitPrefix (0.00s)
+    probe_review_test.go:40: R4: deadline stored = 2027-03-29 00:59:59 +0200 CEST; show prints "дедлайн:   29.03.2027"
+--- PASS: TestProbe_R4_DST (0.00s)
+    probe_review_test.go:48: R7: output contains ESC = true, contains CR = true
+--- PASS: TestProbe_R7_ControlChars (0.00s)
+ok  	taskflow/internal/cli	0.002s
+
+$ grep -n "удалена\|reopen" internal/cli/cli_test.go
+141:	out := a.run(t, "submit 1\ncancel 1\nreopen 1\nadd new | текст\nsubmit 2\nshow 2\n")
+
+$ go env GOTOOLCHAIN; go version
+auto
+go version go1.24.7 linux/amd64
+
+$ go list -f "{{.ImportPath}}: {{.Imports}}" ./internal/cli | grep -o "taskflow/internal/[a-z]*"
+taskflow/internal/service
+taskflow/internal/task
+taskflow/internal/worker
