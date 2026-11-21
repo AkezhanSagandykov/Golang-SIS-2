@@ -56,7 +56,9 @@ func TestExecute_ExitAndQuitReturnErrExit(t *testing.T) {
 			t.Errorf("Execute(%q) = %v, want ErrExit", line, err)
 		}
 	}
-	if err := c.Execute("unknown"); err == nil || errors.Is(err, ErrExit) {
-		t.Errorf("Execute(unknown) = %v, want an unknown-command error", err)
+	for _, line := range []string{"unknown", "quit smoking", "exit now"} {
+		if err := c.Execute(line); err == nil || errors.Is(err, ErrExit) {
+			t.Errorf("Execute(%q) = %v, want an error that is not ErrExit", line, err)
+		}
 	}
 }

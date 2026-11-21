@@ -257,3 +257,11 @@ func TestCLI_LastLineWithoutNewline(t *testing.T) {
 	a := newApp(t, nil, 5)
 	assertContains(t, a.run(t, "add first\r\nadd second"), "создана задача #1", "создана задача #2")
 }
+
+// Regression test for risk R2: only a bare "exit"/"quit" ends the session; a line that
+// merely starts with one of these words must not lose the user's tasks.
+func TestCLI_ExitWithArgumentsDoesNotEndSession(t *testing.T) {
+	a := newApp(t, nil, 5)
+	out := a.run(t, "add first\nquit smoking by friday\nexit now\nadd second\n")
+	assertContains(t, out, "создана задача #2", "ошибка: команда exit/quit не принимает аргументов")
+}

@@ -50,7 +50,12 @@ func commandTable() []command {
 		{names: []string{"help"}, usage: "help", summary: "эта справка",
 			run: func(c *CLI, _ []string, _ string) error { c.help(); return nil }},
 		{names: []string{"exit", "quit"}, usage: "exit | quit", summary: "выход (воркеры доделают задачи из очереди)",
-			run: func(*CLI, []string, string) error { return ErrExit }},
+			run: func(_ *CLI, args []string, _ string) error {
+				if len(args) > 0 { // risk R2: "quit smoking" must not end the session
+					return errors.New("команда exit/quit не принимает аргументов")
+				}
+				return ErrExit
+			}},
 	}
 }
 
